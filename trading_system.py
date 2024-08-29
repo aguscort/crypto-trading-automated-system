@@ -4,32 +4,177 @@ import requests
 import time
 import hmac
 import hashlib
+import logging
 from urllib.parse import urlencode
+from datetime import datetime
+from config.api_keys import API_KEY, SECRET_KEY
 
-class BinanceFuturesClient:
-    def __init__(self, testnet=True, api_key=None, api_secret=None):
+logger = logging.getLogger()
+
+class ExchangeClient:
+    def __init__(self, testnet=True, api_key=None, api_secret=None, position_id, symbol, position_type, size, entry_price, open_time):
         """
-        Initialize the Binance Futures Client.
+        Initialize a TradingPosition.
         
-        :param testnet: Boolean, use testnet if True, real network if False
-        :param api_key: String, your Binance API key
-        :param api_secret: String, your Binance API secret
+        :param position_id: String, unique identifier for the position
+        :param symbol: String, the trading pair symbol
+        :param position_type: String, 'long' or 'short'
+        :param open_time: Datetime, time when the position was opened
+        :param entry_price: Float, price at which the position was entered
+        :param quantity: Float, size of the position
+        :param order_type: String, type of the entry order (e.g., 'market', 'limit')
+        :param entry_order_id: String, ID of the entry order
         """
+        self._position_id = position_id
+        self._symbol = symbol
+        self._position_type = position_type
+        self._size = size
+        self._entry_price = entry_price
+        self._open_time = open_time
+        self._stop_loss = None
+        self._take_profit = None
+        self._current_price = entry_price
+        self._pnl = 0
+        self._status = 'open'
         self.testnet = testnet
-        self.api_key = api_key
-        self.api_secret = api_secret
+        self.api_key = API_KEY
+        self.api_secret = SECRET_KEY
         
         if self.testnet:
             self.base_url = 'https://testnet.binancefuture.com'
         else:
             self.base_url = 'https://fapi.binance.com'
+        
+        # Initialize other attributes
+        self._nominal_value = None
+        self._margin_used = None
+        self._leverage = None
+        self._stop_loss = None
+        self._take_profit = None
+        self._status = 'open'
+        self._unrealized_pnl = 0.0
+        self._pnl_percentage = 0.0
+        self._close_time = None
+        self._close_price = None
+        self._realized_pnl = None
+        self._close_order_id = None
+        self._strategy = None
+        self._entry_reason = None
+        self._notes = None
+        self._market_volatility = None
+        self._market_volume = None
+        self._commission = 0.0
+        self._funding_fee = 0.0
+        self._account_id = None
+        self._trading_session_id = None
+        self._highest_price = entry_price
+        self._lowest_price = entry_price
+        self._position_duration = None
+
+    # Getters and setters for each attribute
+    def get_position_id(self):
+        return self._position_id
+
+    # Getters and Setters for symbol
+    def get_symbol(self):
+        return self._symbol
+
+    # Getters and Setters for position_type
+    def get_position_type(self):
+        return self._position_type
+
+    def set_position_type(self, position_type):
+        if position_type not in ['long', 'short']:
+            raise ValueError("Position type must be 'long' or 'short'")
+        self._position_type = position_type
+
+    # Getters and Setters for size
+    def get_size(self):
+        return self._size
+
+    def set_size(self, size):
+        if size <= 0:
+            raise ValueError("Size must be positive")
+        self._size = size
+
+    # Getters and Setters for entry_price
+    def get_entry_price(self):
+        return self._entry_price
+
+    # Getters and Setters for open_time
+    def get_open_time(self):
+        return self._open_time
+
+    # Getters and Setters for stop_loss
+    def get_stop_loss(self):
+        return self._stop_loss
+
+    def set_stop_loss(self, stop_loss):
+        if stop_loss is not None and stop_loss <= 0:
+            raise ValueError("Stop loss must be positive or None")
+        self._stop_loss = stop_loss
+
+    # Getters and Setters for take_profit
+    def get_take_profit(self):
+        return self._take_profit
+
+    def set_take_profit(self, take_profit):
+        if take_profit is not None and take_profit <= 0:
+            raise ValueError("Take profit must be positive or None")
+        self._take_profit = take_profit
+
+    # Getters and Setters for current_price
+    def get_current_price(self):
+        return self._current_price
+
+    def set_current_price(self, current_price):
+        if current_price <= 0:
+            raise ValueError("Current price must be positive")
+        self._current_price = current_price
+        self._update_pnl()
+
+    # Getters for pnl (no setter as it's calculated)
+    def get_pnl(self):
+        return self._pnl
+
+    # Getters and Setters for status
+    def get_status(self):
+        return self._status
+
+    def set_status(self, status):
+        if status not in ['open', 'closed']:
+            raise ValueError("Status must be 'open' or 'closed'")
+        self._status = status
+
+    # Helper method to update PNL
+    def _update_pnl(self):
+        if self._position_type == 'long':
+            self._pnl = (self._current_price - self._entry_price) * self._size
+        else:
+            self._pnl = (self._entry_price - self._current_price) * self._size
+
+    # Method to close the position
+    def close_position(self, close_price, close_time):
+        self.set_current_price(close_price)
+        self.set_status('closed')
+        return {
+            'position_id': self._position_id,
+            'symbol': self._symbol,
+            'type': self._position_type,
+            'size': self._size,
+            'entry_price': self._entry_price,
+            'open_time': self._open_time,
+            'close_price': close_price,
+            'close_time': close_time,
+            'pnl': self._pnl
+        }
 
     def _generate_signature(self, data):
         """Generate signature for authenticated requests."""
         return hmac.new(self.api_secret.encode('utf-8'), urlencode(data).encode('utf-8'), hashlib.sha256).hexdigest()
 
     def _send_request(self, method, endpoint, params=None, signed=False):
-        """Send HTTP request to Binance Futures API."""
+        """Send HTTP request to Binance API."""
         url = f"{self.base_url}{endpoint}"
         headers = {"X-MBX-APIKEY": self.api_key} if self.api_key else {}
 
@@ -44,13 +189,19 @@ class BinanceFuturesClient:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error in API request: {e}")
+            logger.error(f"Error in API request: {e}")
             return None
 
     def get_exchange_info(self):
         """Get exchange information."""
         return self._send_request('GET', '/fapi/v1/exchangeInfo')
 
+    # def get_bid_ask(self, symbol):
+    #     params = {'symbol': symbol}
+    #     ob_data = self._send_request('GET', '/fapi/v1/ticker/bookTicker', params)   
+    #     if ob_data is not None:
+    #         if symbol is not in self.prices:
+                
     def get_order_book(self, symbol, limit=100):
         params = {'symbol': symbol, 'limit': limit}
         return self._send_request('GET', '/fapi/v1/depth', params)
@@ -208,11 +359,11 @@ class BinanceFuturesClient:
         return self._send_request('GET', '/fapi/v2/positionRisk', params, signed=True)
 
 class TradingStrategies:
-    def __init__(self, client: BinanceFuturesClient):
+    def __init__(self, client: ExchangeClient):
         """
-        Initialize TradingStrategies with a BinanceFuturesClient.
+        Initialize TradingStrategies with a ExchangeClient.
         
-        :param client: BinanceFuturesClient instance
+        :param client: ExchangeClient instance
         """
         self.client = client
 
@@ -231,68 +382,174 @@ class TradingStrategies:
             df[col] = df[col].astype(float)
         return df
 
-    def sma_crossover(self, df, short_window=10, long_window=50):
-        """
-        Simple Moving Average Crossover strategy.
-        
-        :param df: DataFrame with historical price data
-        :param short_window: Integer, the short-term moving average window
-        :param long_window: Integer, the long-term moving average window
-        """
+    def simple_moving_average_crossover(self, symbol, interval, short_window=10, long_window=50):
+        df = self.get_historical_klines(symbol, interval)
         df['short_ma'] = df['close'].rolling(window=short_window).mean()
         df['long_ma'] = df['close'].rolling(window=long_window).mean()
+
         df['signal'] = np.where(df['short_ma'] > df['long_ma'], 1, 0)
         df['position'] = df['signal'].diff()
-        return df
 
-    def rsi(self, df, period=14, oversold=30, overbought=70):
-        """
-        Relative Strength Index (RSI) strategy.
-        
-        :param df: DataFrame with historical price data
-        :param period: Integer, the RSI period
-        :param oversold: Integer, the oversold level
-        :param overbought: Integer, the overbought level
-        """
+        return df['position'].iloc[-1]
+
+    def relative_strength_index(self, symbol, interval, period=14, oversold=30, overbought=70):
+        df = self.get_historical_klines(symbol, interval)
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
         
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
-        df['signal'] = np.where(df['rsi'] < oversold, 1, np.where(df['rsi'] > overbought, -1, 0))
-        return df
 
-    # Add more trading strategies as needed
-
-    def backtest(self, df, strategy_name, **strategy_params):
-        """
-        Perform backtesting on a given strategy.
-        
-        :param df: DataFrame with historical price data
-        :param strategy_name: String, name of the strategy to backtest
-        :param strategy_params: Additional parameters for the strategy
-        """
-        if strategy_name == 'sma_crossover':
-            df = self.sma_crossover(df, **strategy_params)
-        elif strategy_name == 'rsi':
-            df = self.rsi(df, **strategy_params)
+        if df['rsi'].iloc[-1] < oversold:
+            return 1  # Señal de compra
+        elif df['rsi'].iloc[-1] > overbought:
+            return -1  # Señal de venta
         else:
-            raise ValueError(f"Unknown strategy: {strategy_name}")
+            return 0  # Sin señal
 
+    def bollinger_bands(self, symbol, interval, period=20, num_std=2):
+        df = self.get_historical_klines(symbol, interval)
+        df['sma'] = df['close'].rolling(window=period).mean()
+        df['std'] = df['close'].rolling(window=period).std()
+        df['upper_band'] = df['sma'] + (df['std'] * num_std)
+        df['lower_band'] = df['sma'] - (df['std'] * num_std)
+
+        if df['close'].iloc[-1] < df['lower_band'].iloc[-1]:
+            return 1  # Señal de compra
+        elif df['close'].iloc[-1] > df['upper_band'].iloc[-1]:
+            return -1  # Señal de venta
+        else:
+            return 0  # Sin señal
+
+    def macd(self, symbol, interval, fast_period=12, slow_period=26, signal_period=9):
+        df = self.get_historical_klines(symbol, interval)
+        df['ema_fast'] = df['close'].ewm(span=fast_period, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=slow_period, adjust=False).mean()
+        df['macd'] = df['ema_fast'] - df['ema_slow']
+        df['signal_line'] = df['macd'].ewm(span=signal_period, adjust=False).mean()
+        df['histogram'] = df['macd'] - df['signal_line']
+
+        if df['macd'].iloc[-1] > df['signal_line'].iloc[-1] and df['macd'].iloc[-2] <= df['signal_line'].iloc[-2]:
+            return 1  # Señal de compra
+        elif df['macd'].iloc[-1] < df['signal_line'].iloc[-1] and df['macd'].iloc[-2] >= df['signal_line'].iloc[-2]:
+            return -1  # Señal de venta
+        else:
+            return 0  # Sin señal
+
+    def fibonacci_retracement(self, symbol, interval, period=100):
+        df = self.get_historical_klines(symbol, interval, limit=period)
+        high = df['high'].max()
+        low = df['low'].min()
+        diff = high - low
+
+        levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1]
+        fib_levels = [high - (diff * level) for level in levels]
+
+        current_price = df['close'].iloc[-1]
+        for i in range(len(fib_levels) - 1):
+            if fib_levels[i] >= current_price >= fib_levels[i+1]:
+                if i < 3:  # Si el precio está en los niveles inferiores de Fibonacci
+                    return 1  # Señal de compra
+                elif i > 3:  # Si el precio está en los niveles superiores de Fibonacci
+                    return -1  # Señal de venta
+        return 0  # Sin señal
+
+    def implement_strategy(self, symbol, interval, strategy='sma_crossover', **kwargs):
+        if strategy == 'sma_crossover':
+            return self.simple_moving_average_crossover(symbol, interval, **kwargs)
+        elif strategy == 'rsi':
+            return self.relative_strength_index(symbol, interval, **kwargs)
+        elif strategy == 'bollinger_bands':
+            return self.bollinger_bands(symbol, interval, **kwargs)
+        elif strategy == 'macd':
+            return self.macd(symbol, interval, **kwargs)
+        elif strategy == 'fibonacci':
+            return self.fibonacci_retracement(symbol, interval, **kwargs)
+        else:
+            raise ValueError(f"Estrategia '{strategy}' no reconocida")
+
+    def backtest_strategy(self, symbol, interval, strategy='sma_crossover', start_date=None, end_date=None, initial_balance=10000, **kwargs):
+        df = self.get_historical_klines(symbol, interval)
+        
+        if start_date:
+            df = df[df['timestamp'] >= pd.to_datetime(start_date)]
+        if end_date:
+            df = df[df['timestamp'] <= pd.to_datetime(end_date)]
+
+        df['signal'] = df.apply(lambda row: self.implement_strategy(symbol, interval, strategy, **kwargs), axis=1)
+        df['position'] = df['signal'].shift(1)
         df['returns'] = df['close'].pct_change()
-        df['strategy_returns'] = df['signal'].shift(1) * df['returns']
-        df['cumulative_returns'] = (1 + df['returns']).cumprod()
+        df['strategy_returns'] = df['position'] * df['returns']
+        df['cumulative_returns'] = (1 + df['strategy_returns']).cumprod()
         df['cumulative_strategy_returns'] = (1 + df['strategy_returns']).cumprod()
 
         total_return = (df['cumulative_strategy_returns'].iloc[-1] - 1) * 100
         sharpe_ratio = np.sqrt(252) * df['strategy_returns'].mean() / df['strategy_returns'].std()
         max_drawdown = (df['cumulative_strategy_returns'] / df['cumulative_strategy_returns'].cummax() - 1).min()
 
-        print(f"Backtesting results for {strategy_name}:")
-        print(f"Total Return: {total_return:.2f}%")
-        print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
-        print(f"Max Drawdown: {max_drawdown:.2f}%")
+        print(f"Resultados del backtesting para {symbol} usando la estrategia {strategy}:")
+        print(f"Retorno total: {total_return:.2f}%")
+        print(f"Ratio de Sharpe: {sharpe_ratio:.2f}")
+        print(f"Máximo drawdown: {max_drawdown:.2f}%")
 
         return df
 
+class TradingBot:
+    def __init__(self, exchange_client: ExchangeClient):
+        self.client = exchange_client
+        self.strategies = TradingStrategies(self.client)
+
+    def run_strategy(self, symbol: str, interval: str, strategy: str, quantity: float, **kwargs):
+        df = self.strategies.implement_strategy(symbol, interval, strategy, **kwargs)
+        
+        if df is None:
+            return
+
+        last_signal = df['signal'].iloc[-1]
+        
+        if last_signal == 1:
+            logger.info(f"Buying {quantity} of {symbol}")
+            order = self.client.create_order(symbol, 'BUY', 'MARKET', quantity)
+            logger.info(f"Buy order placed: {order}")
+        elif last_signal == -1:
+            logger.info(f"Selling {quantity} of {symbol}")
+            order = self.client.create_order(symbol, 'SELL', 'MARKET', quantity)
+            logger.info(f"Sell order placed: {order}")
+        else:
+            logger.info("No trading signal")
+
+    def backtest(self, symbol: str, interval: str, strategy: str, start_date: str, end_date: str, **kwargs):
+        return self.strategies.backtest_strategy(symbol, interval, strategy, start_date, end_date, **kwargs)
+
+    def get_account_balance(self):
+        balance = self.client.get_account_balance()
+        if balance:
+            logger.info(f"Account balance: {balance}")
+        else:
+            logger.error("Failed to fetch account balance")
+        return balance
+
+    def get_open_orders(self, symbol: str):
+        orders = self.client.get_open_orders(symbol)
+        if orders:
+            logger.info(f"Open orders for {symbol}: {orders}")
+        else:
+            logger.error(f"Failed to fetch open orders for {symbol}")
+        return orders
+
+    def cancel_order(self, symbol: str, order_id: str):
+        result = self.client.cancel_order(symbol, order_id)
+        if result:
+            logger.info(f"Order cancelled: {result}")
+        else:
+            logger.error(f"Failed to cancel order {order_id} for {symbol}")
+        return result
+
+    def get_position_risk(self, symbol: str):
+        risk = self.client.get_position_risk(symbol)
+        if risk:
+            logger.info(f"Position risk for {symbol}: {risk}")
+        else:
+            logger.error(f"Failed to fetch position risk for {symbol}")
+        return risk
