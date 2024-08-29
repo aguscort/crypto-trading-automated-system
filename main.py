@@ -1,6 +1,8 @@
 import logging
 from config.api_keys import API_KEY, SECRET_KEY
 import trading_system 
+import websocket
+import threading
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -26,5 +28,5 @@ if __name__ == "__main__":
     strategy = "SMA"  # o "RSI
     testnet = True
     
-    cliente = trading_system.ExchangeClient(True)
-    print(cliente.get_recent_trades(symbol='DOGSUSDT'))
+    cliente = trading_system.ExchangeClient(True, symbol='DOGSUSDT')
+    print(trading_system.TradingBot(cliente))

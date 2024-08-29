@@ -6,13 +6,16 @@ import hmac
 import hashlib
 import logging
 from urllib.parse import urlencode
+import websocket
+import threading
+import json
 from datetime import datetime
 from config.api_keys import API_KEY, SECRET_KEY
 
 logger = logging.getLogger()
 
 class ExchangeClient:
-    def __init__(self, testnet=True, api_key=None, api_secret=None, position_id, symbol, position_type, size, entry_price, open_time):
+    def __init__(self, testnet=True, api_key=None, api_secret=None, symbol='BTCUSDT', position_type=None, size=None, entry_price=None, open_time=None):
         """
         Initialize a TradingPosition.
         
@@ -25,7 +28,7 @@ class ExchangeClient:
         :param order_type: String, type of the entry order (e.g., 'market', 'limit')
         :param entry_order_id: String, ID of the entry order
         """
-        self._position_id = position_id
+        self._position_id = None
         self._symbol = symbol
         self._position_type = position_type
         self._size = size
@@ -36,14 +39,17 @@ class ExchangeClient:
         self._current_price = entry_price
         self._pnl = 0
         self._status = 'open'
+        self._prices = dict()
         self.testnet = testnet
         self.api_key = API_KEY
         self.api_secret = SECRET_KEY
         
         if self.testnet:
             self.base_url = 'https://testnet.binancefuture.com'
+            self.wss_url = 'wss://stream.binancefuture.com/ws'
         else:
             self.base_url = 'https://fapi.binance.com'
+            self.base_url = 'wss://fstream.binancefuture.com/ws'
         
         # Initialize other attributes
         self._nominal_value = None
@@ -189,54 +195,59 @@ class ExchangeClient:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error in API request: {e}")
+            logger.error("Error while making %s request to %s: %s (error code %s)", method, endpoint, response.json(), response.status_code)
             return None
 
-    def get_exchange_info(self):
+    def get_historical_candles(self, symbol, interval):
+        """
+        Get kline/candlestick data.
+        
+        :param symbol: String, the trading pair
+        :param interval: String, the interval of kline, e.g., '1m', '5m', '1h', '1d'
+        """
+        data = dict ()
+        data['symbol'] = symbol
+        data['interval'] = interval
+        data['limit'] = 1000
+        raw_candles = self._send_request('GET', '/fapi/v1/klines', data)
+        candles = []
+        if raw_candles is not None:
+            for c in raw_candles:
+                candles.append([c[0], float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])])
+        return candles
+
+    def get_contracts(self):
         """Get exchange information."""
-        return self._send_request('GET', '/fapi/v1/exchangeInfo')
-
-    # def get_bid_ask(self, symbol):
-    #     params = {'symbol': symbol}
-    #     ob_data = self._send_request('GET', '/fapi/v1/ticker/bookTicker', params)   
-    #     if ob_data is not None:
-    #         if symbol is not in self.prices:
-                
-    def get_order_book(self, symbol, limit=100):
-        params = {'symbol': symbol, 'limit': limit}
-        return self._send_request('GET', '/fapi/v1/depth', params)
-
-    def get_recent_trades(self, symbol, limit=500):
-        params = {'symbol': symbol, 'limit': limit}
-        return self._send_request('GET', '/fapi/v1/trades', params)
-
-    def get_aggregate_trades(self, symbol, **kwargs):
-        params = {'symbol': symbol, **kwargs}
-        return self._send_request('GET', '/fapi/v1/aggTrades', params)
+        exchange_info = self._send_request('GET', '/fapi/v1/exchangeInfo', None)
+        contracts= dict()
+        if exchange_info is not None:
+            for contract_data  in exchange_info['symbols']:
+                contracts[contract_data['pair']] = contract_data
+        return contracts
     
-    def get_continuous_klines(self, pair, contractType, interval, **kwargs):
-        params = {'pair': pair, 'contractType': contractType, 'interval': interval, **kwargs}
-        return self._send_request('GET', '/fapi/v1/continuousKlines', params)
+    def get_bid_ask(self, symbol):
+        data = dict()
+        data['symbol'] = symbol
+        ob_data = self._send_request('GET', '/fapi/v1/ticker/bookTicker', data)
+        if ob_data is not None:
+            if symbol not in self._prices:
+                self._prices[symbol] = {'bid': float(ob_data['bidPrice']), 'ask': float(ob_data['askPrice'])}
+            else:
+                self._prices[symbol]['bid']: float(ob_data['bidPrice'])
+                self._prices[symbol]['ask']: float(ob_data['askPrice'])
+        return self._prices[symbol]
+    
+    def get_balances(self):
+        data = dict()
+        data['timestamp'] = int(time.time() * 1000)
+        data['signature'] = self._generate_signature(data)
+        balances = dict()
+        account_data = self._send_request ('GET', '/fapi/v1/account', data)    
+        if account_data is not None:
+            for a in account_data['assets']:
+                balances[a['asset']] = a
+        return balances
 
-    def get_index_price_klines(self, pair, interval, **kwargs):
-        params = {'pair': pair, 'interval': interval, **kwargs}
-        return self._send_request('GET', '/fapi/v1/indexPriceKlines', params)
-
-    def get_mark_price_klines(self, symbol, interval, **kwargs):
-        params = {'symbol': symbol, 'interval': interval, **kwargs}
-        return self._send_request('GET', '/fapi/v1/markPriceKlines', params)
-
-    def get_mark_price(self, symbol=None):
-        params = {}
-        if symbol:
-            params['symbol'] = symbol
-        return self._send_request('GET', '/fapi/v1/premiumIndex', params)
-
-    def get_funding_rate(self, symbol=None, **kwargs):
-        params = {**kwargs}
-        if symbol:
-            params['symbol'] = symbol
-        return self._send_request('GET', '/fapi/v1/fundingRate', params)
 
     def get_ticker_24hr(self, symbol=None):
         params = {}
@@ -250,12 +261,6 @@ class ExchangeClient:
             params['symbol'] = symbol
         return self._send_request('GET', '/fapi/v1/ticker/price', params)
 
-    def get_ticker_book_ticker(self, symbol=None):
-        params = {}
-        if symbol:
-            params['symbol'] = symbol
-        return self._send_request('GET', '/fapi/v1/ticker/bookTicker', params)
-
     def get_open_interest(self, symbol):
         params = {'symbol': symbol}
         return self._send_request('GET', '/fapi/v1/openInterest', params)
@@ -263,33 +268,32 @@ class ExchangeClient:
     def get_open_interest_hist(self, symbol, period, **kwargs):
         params = {'symbol': symbol, 'period': period, **kwargs}
         return self._send_request('GET', '/futures/data/openInterestHist', params)
+    
+    def get_account_balance(self):
+        """Get current account balance."""
+        return self._send_request('GET', '/fapi/v2/balance', signed=True)
 
-    def get_top_long_short_account_ratio(self, symbol, period, **kwargs):
-        params = {'symbol': symbol, 'period': period, **kwargs}
-        return self._send_request('GET', '/futures/data/topLongShortAccountRatio', params)
-
-    def get_top_long_short_position_ratio(self, symbol, period, **kwargs):
-        params = {'symbol': symbol, 'period': period, **kwargs}
-        return self._send_request('GET', '/futures/data/topLongShortPositionRatio', params)
-
-    def get_global_long_short_account_ratio(self, symbol, period, **kwargs):
-        params = {'symbol': symbol, 'period': period, **kwargs}
-        return self._send_request('GET', '/futures/data/globalLongShortAccountRatio', params)
-
-    def get_taker_long_short_ratio(self, symbol, period, **kwargs):
-        params = {'symbol': symbol, 'period': period, **kwargs}
-        return self._send_request('GET', '/futures/data/takerlongshortRatio', params)
-
-    def get_klines(self, symbol, interval, limit=500):
+    def get_position_risk(self, symbol=None):
         """
-        Get kline/candlestick data.
+        Get position risk.
         
-        :param symbol: String, the trading pair
-        :param interval: String, the interval of kline, e.g., '1m', '5m', '1h', '1d'
-        :param limit: Integer, the number of klines to retrieve (max 1000)
+        :param symbol: String, the trading pair (optional)
         """
-        params = {'symbol': symbol, 'interval': interval, 'limit': limit}
-        return self._send_request('GET', '/fapi/v1/klines', params)
+        params = {}
+        if symbol:
+            params['symbol'] = symbol
+        return self._send_request('GET', '/fapi/v2/positionRisk', params, signed=True)
+    
+    def get_open_orders(self, symbol=None):
+        """
+        Get all open orders on a symbol.
+        
+        :param symbol: String, the trading pair (optional)
+        """
+        params = {}
+        if symbol:
+            params['symbol'] = symbol
+        return self._send_request('GET', '/fapi/v1/openOrders', params, signed=True)
 
     def create_order(self, symbol, side, order_type, quantity, price=None, time_in_force="GTC"):
         """
@@ -314,17 +318,6 @@ class ExchangeClient:
 
         return self._send_request('POST', '/fapi/v1/order', params, signed=True)
 
-    def get_open_orders(self, symbol=None):
-        """
-        Get all open orders on a symbol.
-        
-        :param symbol: String, the trading pair (optional)
-        """
-        params = {}
-        if symbol:
-            params['symbol'] = symbol
-        return self._send_request('GET', '/fapi/v1/openOrders', params, signed=True)
-
     def cancel_order(self, symbol, order_id=None, orig_client_order_id=None):
         """
         Cancel an active order.
@@ -343,22 +336,7 @@ class ExchangeClient:
 
         return self._send_request('DELETE', '/fapi/v1/order', params, signed=True)
 
-    def get_account_balance(self):
-        """Get current account balance."""
-        return self._send_request('GET', '/fapi/v2/balance', signed=True)
-
-    def get_position_risk(self, symbol=None):
-        """
-        Get position risk.
-        
-        :param symbol: String, the trading pair (optional)
-        """
-        params = {}
-        if symbol:
-            params['symbol'] = symbol
-        return self._send_request('GET', '/fapi/v2/positionRisk', params, signed=True)
-
-class TradingStrategies:
+class TradingStrategies():
     def __init__(self, client: ExchangeClient):
         """
         Initialize TradingStrategies with a ExchangeClient.
@@ -499,6 +477,50 @@ class TradingBot:
     def __init__(self, exchange_client: ExchangeClient):
         self.client = exchange_client
         self.strategies = TradingStrategies(self.client)
+        t = threading.Thread(target=self.start_ws)
+        t.start()
+        logger.info('Binance Futures Client successfully initialized')
+        self.id = 1
+        self.ws = None
+
+    def start_ws(self):
+        self.ws = websocket.WebSocketApp(self.client.wss_url, on_open=self.on_open, on_close=self.on_close, on_error=self.on_error, on_message=self.on_message)
+        self.ws.run_forever()
+
+    def on_open(self, ws):
+        logger.info('Binance Connection opened')
+
+    def on_close(self, ws):
+        logger.warning('Binance Websocket Connection Closed')
+
+    def on_error(self, ws, msg):
+        logger.error('Binance Connection error: %s', msg)
+
+    def on_message(self, ws, msg):
+        print(msg)
+
+        data = json.loads(msg)
+
+        if 'e' in data:
+            if data['e'] == 'bookTicker':
+                symbol = data['s']
+                if symbol not in self._prices:
+                    client._prices[symbol] = {'bid': float(data['b']), 'ask': float(data['a'])}
+                else:
+                    client._prices[symbol]['bid']: float(data['b'])
+                    client._prices[symbol]['ask']: float(data['a'])
+                print(client.prices[symbol])
+    
+
+    def subscribe_channel(self, symbol):
+        data = dict()
+        data['method'] = 'SUBSCRIBE'
+        data['params'] = []
+        data['params'] = append(symbol.lower()+ '@bookTicker')
+        data['id'] = self.id
+        self.ws.send(json.dumps(data))
+        self.id += 1
+
 
     def run_strategy(self, symbol: str, interval: str, strategy: str, quantity: float, **kwargs):
         df = self.strategies.implement_strategy(symbol, interval, strategy, **kwargs)
@@ -522,29 +544,29 @@ class TradingBot:
     def backtest(self, symbol: str, interval: str, strategy: str, start_date: str, end_date: str, **kwargs):
         return self.strategies.backtest_strategy(symbol, interval, strategy, start_date, end_date, **kwargs)
 
-    def get_account_balance(self):
-        balance = self.client.get_account_balance()
-        if balance:
-            logger.info(f"Account balance: {balance}")
-        else:
-            logger.error("Failed to fetch account balance")
-        return balance
+    # def get_account_balance(self):
+    #     balance = self.client.get_account_balance()
+    #     if balance:
+    #         logger.info(f"Account balance: {balance}")
+    #     else:
+    #         logger.error("Failed to fetch account balance")
+    #     return balance
 
-    def get_open_orders(self, symbol: str):
-        orders = self.client.get_open_orders(symbol)
-        if orders:
-            logger.info(f"Open orders for {symbol}: {orders}")
-        else:
-            logger.error(f"Failed to fetch open orders for {symbol}")
-        return orders
+    # def get_open_orders(self, symbol: str):
+    #     orders = self.client.get_open_orders(symbol)
+    #     if orders:
+    #         logger.info(f"Open orders for {symbol}: {orders}")
+    #     else:
+    #         logger.error(f"Failed to fetch open orders for {symbol}")
+    #     return orders
 
-    def cancel_order(self, symbol: str, order_id: str):
-        result = self.client.cancel_order(symbol, order_id)
-        if result:
-            logger.info(f"Order cancelled: {result}")
-        else:
-            logger.error(f"Failed to cancel order {order_id} for {symbol}")
-        return result
+    # def cancel_order(self, symbol: str, order_id: str):
+    #     result = self.client.cancel_order(symbol, order_id)
+    #     if result:
+    #         logger.info(f"Order cancelled: {result}")
+    #     else:
+    #         logger.error(f"Failed to cancel order {order_id} for {symbol}")
+    #     return result
 
     def get_position_risk(self, symbol: str):
         risk = self.client.get_position_risk(symbol)
