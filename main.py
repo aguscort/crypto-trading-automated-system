@@ -28,5 +28,5 @@ if __name__ == "__main__":
     strategy = "SMA"  # o "RSI
     testnet = True
     
-    cliente = trading_system.ExchangeClient(True, symbol='DOGSUSDT')
-    print(trading_system.TradingBot(cliente))
+    cliente = trading_system.ExchangeClient(True, symbol='BTCUSDT')
+    trading_system.TradingBot(cliente)

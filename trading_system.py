@@ -336,7 +336,7 @@ class ExchangeClient:
 
         return self._send_request('DELETE', '/fapi/v1/order', params, signed=True)
 
-class TradingStrategies():
+class TradingStrategies:
     def __init__(self, client: ExchangeClient):
         """
         Initialize TradingStrategies with a ExchangeClient.
@@ -477,10 +477,11 @@ class TradingBot:
     def __init__(self, exchange_client: ExchangeClient):
         self.client = exchange_client
         self.strategies = TradingStrategies(self.client)
+        self._symbol = self.client._symbol
         t = threading.Thread(target=self.start_ws)
         t.start()
         logger.info('Binance Futures Client successfully initialized')
-        self.id = 1
+        self._ws_id = 1
         self.ws = None
 
     def start_ws(self):
@@ -489,6 +490,7 @@ class TradingBot:
 
     def on_open(self, ws):
         logger.info('Binance Connection opened')
+        self.subscribe_channel(self._symbol)
 
     def on_close(self, ws):
         logger.warning('Binance Websocket Connection Closed')
@@ -498,13 +500,11 @@ class TradingBot:
 
     def on_message(self, ws, msg):
         print(msg)
-
         data = json.loads(msg)
-
         if 'e' in data:
             if data['e'] == 'bookTicker':
                 symbol = data['s']
-                if symbol not in self._prices:
+                if symbol not in client._prices:
                     client._prices[symbol] = {'bid': float(data['b']), 'ask': float(data['a'])}
                 else:
                     client._prices[symbol]['bid']: float(data['b'])
@@ -516,10 +516,14 @@ class TradingBot:
         data = dict()
         data['method'] = 'SUBSCRIBE'
         data['params'] = []
-        data['params'] = append(symbol.lower()+ '@bookTicker')
-        data['id'] = self.id
-        self.ws.send(json.dumps(data))
-        self.id += 1
+        print(self._symbol.lower())
+        data['params'].append(self._symbol.lower() + '@bookTicker')
+        data['id'] = self._ws_id
+        try:
+            self.ws.send(json.dumps(data))
+        except Exception as e:
+            logger.error('Websocket error while subscribing to %s: %s', self._symbol.lower(), e)
+        self._ws_id += 1
 
 
     def run_strategy(self, symbol: str, interval: str, strategy: str, quantity: float, **kwargs):
