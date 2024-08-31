@@ -424,7 +424,9 @@ class TradingBot:
         self.subscribe_channel()
 
     def on_close(self, ws):
-        logger.warning('Binance Websocket Connection Closed')
+        logger.warning('Binance WebSocket Connection Closed. Attempting to reconnect...')
+        time.sleep(5)  # Espera 5 segundos antes de intentar reconectar
+        self.start_ws()
 
     def on_error(self, ws, msg):
         logger.error('Binance Connection error: %s', msg)
@@ -444,16 +446,23 @@ class TradingBot:
 
     # Método para suscribirse a un canal WebSocket
     def subscribe_channel(self):
-        data = dict()
-        data['method'] = 'SUBSCRIBE'
-        data['params'] = []
-        data['params'].append(self._symbol.lower() + '@trade')
-        data['id'] = self._ws_id
-        try:
-            self.ws.send(json.dumps(data))
-        except Exception as e:
-            logger.error('Websocket error while subscribing to %s: %s', self._symbol.lower(), e)
-        self._ws_id += 1
+        if self.ws.sock and self.ws.sock.connected:
+            data = dict()
+            data['method'] = 'SUBSCRIBE'
+            data['params'] = []
+            data['params'].append(self._symbol.lower() + '@trade')
+            data['id'] = self._ws_id
+            try:
+                self.ws.send(json.dumps(data))
+            except websocket.WebSocketConnectionClosedException:
+                logger.error('WebSocket connection is closed. Attempting to reconnect...')
+                self.start_ws()
+            except Exception as e:
+                logger.error('WebSocket error while subscribing to %s: %s', self._symbol.lower(), str(e))
+            self._ws_id += 1
+        else:
+            logger.error('WebSocket is not connected. Attempting to reconnect...')
+            self.start_ws()
 
     # Método para ejecutar una estrategia de trading
     def run_strategy(self, symbol: str, interval: str, strategy: str, quantity: float, **kwargs):
