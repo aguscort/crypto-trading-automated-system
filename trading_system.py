@@ -14,6 +14,37 @@ from config.api_keys import API_KEY, SECRET_KEY
 
 logger = logging.getLogger()
 
+class Balance:
+    def __init_ (self, info):
+        self.initial_margin = float(info['initialMargin'])
+        self.maintenance_margin = float(info['maintenanceMargin'])
+        self.margin_balance = float(info['marginBalance'])
+        self.wallet_ballance = float(info['walletBallance'])
+        self.unrealized_pnl = float(info['unrealizedPnl'])
+
+class Candle:
+    def __init_ (self, candle_info):
+        self.timestamp = candle_info[0]
+        self.open = float(candle_info[1])
+        self.high = float(candle_info[2])
+        self.low = float(candle_info[3])
+        self.close = float(candle_info[4])  
+        self.volume = float(candle_info[5])
+
+class Contract:
+    def __init_ (self, contract_info):
+        self.symbol = contract_info['symbol']
+        self.base_asset = contract_info['baseAasset']
+        self.quote_asset = contract_info['quoteAsset']
+        self.price_decimals = contract_info['priceDecimals']
+        self.quantity_decimals = contract_info['quantityDecimals']
+
+class OrderStatus:
+    def __init_ (self, order_info):
+        self.order_id = order_info['orderId']
+        self.status = order_info['status']
+        self.avg_price = float(order_info['avgPrice'])
+
 class ExchangeClient:
     def __init__(self, testnet=True, api_key=None, api_secret=None, symbol='BTCUSDT', position_type=None, size=None, entry_price=None, open_time=None):
         """
@@ -43,7 +74,13 @@ class ExchangeClient:
         self.testnet = testnet
         self.api_key = API_KEY
         self.api_secret = SECRET_KEY
-        
+        self.headers = {"X-MBX-APIKEY": self.api_key} 
+        self.contracts = self.get_contracts()
+        self.balances = self.get_balances()
+        self._prices = dict()
+        self.id = 1
+        self.ws = None
+
         if self.testnet:
             self.base_url = 'https://testnet.binancefuture.com'
             self.wss_url = 'wss://stream.binancefuture.com/ws'
@@ -51,32 +88,6 @@ class ExchangeClient:
             self.base_url = 'https://fapi.binance.com'
             self.base_url = 'wss://fstream.binancefuture.com/ws'
         
-        # Initialize other attributes
-        self._nominal_value = None
-        self._margin_used = None
-        self._leverage = None
-        self._stop_loss = None
-        self._take_profit = None
-        self._status = 'open'
-        self._unrealized_pnl = 0.0
-        self._pnl_percentage = 0.0
-        self._close_time = None
-        self._close_price = None
-        self._realized_pnl = None
-        self._close_order_id = None
-        self._strategy = None
-        self._entry_reason = None
-        self._notes = None
-        self._market_volatility = None
-        self._market_volume = None
-        self._commission = 0.0
-        self._funding_fee = 0.0
-        self._account_id = None
-        self._trading_session_id = None
-        self._highest_price = entry_price
-        self._lowest_price = entry_price
-        self._position_duration = None
-
     # Getters and setters for each attribute
     def get_position_id(self):
         return self._position_id
@@ -89,20 +100,10 @@ class ExchangeClient:
     def get_position_type(self):
         return self._position_type
 
-    def set_position_type(self, position_type):
-        if position_type not in ['long', 'short']:
-            raise ValueError("Position type must be 'long' or 'short'")
-        self._position_type = position_type
-
     # Getters and Setters for size
     def get_size(self):
         return self._size
-
-    def set_size(self, size):
-        if size <= 0:
-            raise ValueError("Size must be positive")
-        self._size = size
-
+    
     # Getters and Setters for entry_price
     def get_entry_price(self):
         return self._entry_price
@@ -124,20 +125,9 @@ class ExchangeClient:
     def get_take_profit(self):
         return self._take_profit
 
-    def set_take_profit(self, take_profit):
-        if take_profit is not None and take_profit <= 0:
-            raise ValueError("Take profit must be positive or None")
-        self._take_profit = take_profit
-
     # Getters and Setters for current_price
     def get_current_price(self):
         return self._current_price
-
-    def set_current_price(self, current_price):
-        if current_price <= 0:
-            raise ValueError("Current price must be positive")
-        self._current_price = current_price
-        self._update_pnl()
 
     # Getters for pnl (no setter as it's calculated)
     def get_pnl(self):
@@ -146,11 +136,6 @@ class ExchangeClient:
     # Getters and Setters for status
     def get_status(self):
         return self._status
-
-    def set_status(self, status):
-        if status not in ['open', 'closed']:
-            raise ValueError("Status must be 'open' or 'closed'")
-        self._status = status
 
     # Helper method to update PNL
     def _update_pnl(self):
@@ -198,7 +183,7 @@ class ExchangeClient:
             logger.error("Error while making %s request to %s: %s (error code %s)", method, endpoint, response.json(), response.status_code)
             return None
 
-    def get_historical_candles(self, symbol, interval):
+    def get_historical_candles(self, interval="1h"):
         """
         Get kline/candlestick data.
         
@@ -206,96 +191,99 @@ class ExchangeClient:
         :param interval: String, the interval of kline, e.g., '1m', '5m', '1h', '1d'
         """
         data = dict ()
-        data['symbol'] = symbol
+        data['symbol'] = self._symbol
         data['interval'] = interval
         data['limit'] = 1000
         raw_candles = self._send_request('GET', '/fapi/v1/klines', data)
         candles = []
         if raw_candles is not None:
             for c in raw_candles:
-                candles.append([c[0], float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])])
+                candles.append(Candle(c))
         return candles
 
     def get_contracts(self):
         """Get exchange information."""
-        exchange_info = self._send_request('GET', '/fapi/v1/exchangeInfo', None)
+        data = dict ()
+        data['symbol'] = self._symbol
+        exchange_info = self._send_request('GET', '/fapi/v1/exchangeInfo', data)
         contracts= dict()
         if exchange_info is not None:
-            for contract_data  in exchange_info['symbols']:
-                contracts[contract_data['pair']] = contract_data
+            for contract_data in exchange_info['symbols']:
+                data['symbol'] = self._symbol
+                contracts[contract_data['pair']] = Contract(contract_data)
         return contracts
     
-    def get_bid_ask(self, symbol):
+    def get_bid_ask(self):
         data = dict()
-        data['symbol'] = symbol
+        data['symbol'] = self._symbol
         ob_data = self._send_request('GET', '/fapi/v1/ticker/bookTicker', data)
         if ob_data is not None:
-            if symbol not in self._prices:
-                self._prices[symbol] = {'bid': float(ob_data['bidPrice']), 'ask': float(ob_data['askPrice'])}
+            if self._symbol not in self._prices:
+                self._prices[self._symbol] = {'bid': float(ob_data['bidPrice']), 'ask': float(ob_data['askPrice'])}
             else:
-                self._prices[symbol]['bid']: float(ob_data['bidPrice'])
-                self._prices[symbol]['ask']: float(ob_data['askPrice'])
-        return self._prices[symbol]
+                self._prices[self._symbol]['bid']: float(ob_data['bidPrice'])
+                self._prices[self._symbol]['ask']: float(ob_data['askPrice'])
+        return self._prices[self._symbol]
     
     def get_balances(self):
         data = dict()
+        data['symbol'] = self._symbol
         data['timestamp'] = int(time.time() * 1000)
         data['signature'] = self._generate_signature(data)
         balances = dict()
         account_data = self._send_request ('GET', '/fapi/v1/account', data)    
         if account_data is not None:
             for a in account_data['assets']:
-                balances[a['asset']] = a
+                balances[a['asset']] = Balance(a)
         return balances
 
-
-    def get_ticker_24hr(self, symbol=None):
+    def get_ticker_24hr(self):
         params = {}
-        if symbol:
-            params['symbol'] = symbol
+        if self._symbol:
+            params['symbol'] = self._symbol
         return self._send_request('GET', '/fapi/v1/ticker/24hr', params)
 
-    def get_ticker_price(self, symbol=None):
+    def get_ticker_price(self):
         params = {}
-        if symbol:
-            params['symbol'] = symbol
+        if self._symbol:
+            params['symbol'] = self._symbol
         return self._send_request('GET', '/fapi/v1/ticker/price', params)
 
-    def get_open_interest(self, symbol):
-        params = {'symbol': symbol}
+    def get_open_interest(self):
+        params = {'symbol': self._symbol}
         return self._send_request('GET', '/fapi/v1/openInterest', params)
 
-    def get_open_interest_hist(self, symbol, period, **kwargs):
-        params = {'symbol': symbol, 'period': period, **kwargs}
+    def get_open_interest_hist(self, period, **kwargs):
+        params = {'symbol': self._symbol, 'period': period, **kwargs}
         return self._send_request('GET', '/futures/data/openInterestHist', params)
     
     def get_account_balance(self):
         """Get current account balance."""
         return self._send_request('GET', '/fapi/v2/balance', signed=True)
 
-    def get_position_risk(self, symbol=None):
+    def get_position_risk(self):
         """
         Get position risk.
         
         :param symbol: String, the trading pair (optional)
         """
         params = {}
-        if symbol:
-            params['symbol'] = symbol
+        if self._symbol:
+            params['symbol'] = self._symbol
         return self._send_request('GET', '/fapi/v2/positionRisk', params, signed=True)
     
-    def get_open_orders(self, symbol=None):
+    def get_open_orders(self):
         """
         Get all open orders on a symbol.
         
         :param symbol: String, the trading pair (optional)
         """
         params = {}
-        if symbol:
-            params['symbol'] = symbol
+        if self._symbol:
+            params['symbol'] = self._symbol
         return self._send_request('GET', '/fapi/v1/openOrders', params, signed=True)
 
-    def create_order(self, symbol, side, order_type, quantity, price=None, time_in_force="GTC"):
+    def place_order(self, side, quantity, order_type, price=None, time_in_force=None):
         """
         Create a new order.
         
@@ -306,19 +294,23 @@ class ExchangeClient:
         :param price: Float, the price for limit orders (optional)
         :param time_in_force: String, 'GTC', 'IOC', 'FOK' (optional, default 'GTC')
         """
-        params = {
-            'symbol': symbol,
+        data = {
+            'symbol': self._symbol,
             'side': side,
-            'type': order_type,
             'quantity': quantity,
+            'type': order_type,
             'timeInForce': time_in_force
         }
         if price:
-            params['price'] = price
-
-        return self._send_request('POST', '/fapi/v1/order', params, signed=True)
-
-    def cancel_order(self, symbol, order_id=None, orig_client_order_id=None):
+            data['price'] = price
+        if price:
+            data['time_in_force'] = time_in_force
+        order_status = self._send_request('POST', '/fapi/v1/order', data, signed=True)
+        if order_status:
+            order_status = OrderStatus(order_status)
+        return order_status
+    
+    def cancel_order(self, order_id):
         """
         Cancel an active order.
         
@@ -326,15 +318,13 @@ class ExchangeClient:
         :param order_id: Integer, the order id to cancel (optional)
         :param orig_client_order_id: String, the client order id to cancel (optional)
         """
-        params = {'symbol': symbol}
-        if order_id:
-            params['orderId'] = order_id
-        elif orig_client_order_id:
-            params['origClientOrderId'] = orig_client_order_id
-        else:
-            raise ValueError("Either order_id or orig_client_order_id must be provided")
-
-        return self._send_request('DELETE', '/fapi/v1/order', params, signed=True)
+        data = dict()
+        data['orderId'] = order_id
+        data['symbol'] = self._symbol
+        order_status = self._send_request('DELETE', '/fapi/v1/order', data, signed=True)
+        if order_status:
+            order_status = OrderStatus(order_status)
+        return order_status
 
 class TradingStrategies:
     def __init__(self, client: ExchangeClient):
@@ -343,17 +333,16 @@ class TradingStrategies:
         
         :param client: ExchangeClient instance
         """
-        self.client = client
+        self._client = client
 
-    def get_historical_data(self, symbol, interval, limit=500):
+    def get_historical_data(self, interval='1h', limit=100):
         """
         Fetch historical kline data and convert to DataFrame.
         
-        :param symbol: String, the trading pair
         :param interval: String, the interval of kline, e.g., '1m', '5m', '1h', '1d'
         :param limit: Integer, the number of klines to retrieve (max 1000)
         """
-        klines = self.client.get_klines(symbol, interval, limit)
+        klines = self._client.get_historical_candles()
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -490,7 +479,7 @@ class TradingBot:
 
     def on_open(self, ws):
         logger.info('Binance Connection opened')
-        self.subscribe_channel(self._symbol)
+        self.subscribe_channel()
 
     def on_close(self, ws):
         logger.warning('Binance Websocket Connection Closed')
@@ -512,12 +501,13 @@ class TradingBot:
                 print(client.prices[symbol])
     
 
-    def subscribe_channel(self, symbol):
+    def subscribe_channel(self):
         data = dict()
         data['method'] = 'SUBSCRIBE'
         data['params'] = []
-        print(self._symbol.lower())
-        data['params'].append(self._symbol.lower() + '@bookTicker')
+        # data['params'].append(self._symbol.lower() + '@bookTicker')
+        data['params'].append(self._symbol.lower() + '@trade')
+        # data['params'].append(self._symbol.lower() + '@depth20@100ms')
         data['id'] = self._ws_id
         try:
             self.ws.send(json.dumps(data))
